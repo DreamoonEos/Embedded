@@ -1,0 +1,7 @@
+[build]
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+runner = "probe-rs run --chip STM32H723VGTx --protocol swd --rtt-channel-mode no-block-skip"
+# cortex-m-rt's link.x includes the board's memory.x from the project root.
+rustflags = ["-C", "target-cpu=cortex-m7", "-C", "link-arg=-L.", "-C", "link-arg=-Tlink.x"]
