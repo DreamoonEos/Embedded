@@ -36,14 +36,37 @@ def main():
             else:
                 command = {"ping": "PING", "swd": "SWD ID", "can-recv": "CAN RX"}[args.command]
             port.write((command + "\n").encode("ascii"))
-            reply = port.readline(96).decode("ascii", errors="replace").strip()
-            if not reply:
-                parser.exit(1, "No response. Check that this is the control interface.\n")
+            if args.command == "can-recv":
+                reply = read_can_rx(port, parser)
+            else:
+                reply = read_reply(port, parser)
             print(reply)
-            if not (reply.startswith("OK ") or reply == "EMPTY"):
+            if not (reply.startswith("OK ") or reply.startswith("RX ") or reply == "EMPTY"):
                 parser.exit(1)
     except serial.SerialException as err:
         parser.exit(1, f"Serial error: {err}\n")
+
+
+def read_line(port, parser):
+    reply = port.readline(96).decode("ascii", errors="replace").strip()
+    if not reply:
+        parser.exit(1, "No response. Check that this is the control interface.\n")
+    return reply
+
+
+def read_reply(port, parser):
+    """Skip CAN frames the board pushes on its own, then return the command reply."""
+    while True:
+        reply = read_line(port, parser)
+        if not reply.startswith("RX "):
+            return reply
+
+
+def read_can_rx(port, parser):
+    while True:
+        reply = read_line(port, parser)
+        if reply.startswith("RX ") or reply.startswith("OK ") or reply == "EMPTY" or reply.startswith("ERR"):
+            return reply
 
 
 if __name__ == "__main__":

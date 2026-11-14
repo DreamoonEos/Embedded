@@ -1,12 +1,11 @@
 use core::fmt::Write;
-use embassy_stm32::can::{Can, Frame};
-use embassy_time::{Duration, with_timeout};
+use embassy_stm32::can::{BufferedCanSender, Frame};
 use embedded_can::{Frame as _, Id};
 use heapless::String;
 
 use crate::swd::Swd;
 
-type Reply = String<63>;
+pub(crate) type Reply = String<63>;
 
 pub struct Line {
     bytes: [u8; 96],
@@ -42,7 +41,33 @@ fn fixed(text: &str) -> Reply {
     Reply::try_from(text).expect("fixed reply fits one short USB packet")
 }
 
-pub async fn execute(command: &str, can: &mut Can<'_>, swd: &mut Option<Swd>) -> Reply {
+pub fn is_can_rx(command: &str) -> bool {
+    let mut words = command.split_ascii_whitespace();
+    words.next() == Some("CAN") && words.next() == Some("RX") && words.next().is_none()
+}
+
+/// `polled` selects the reply to `CAN RX`. Other frames use the unsolicited form.
+pub fn format_frame(frame: &Frame, polled: bool) -> Option<Reply> {
+    let Id::Standard(id) = *frame.id() else {
+        return None;
+    };
+    if frame.is_remote_frame() {
+        return None;
+    }
+    let mut out = Reply::new();
+    let kind = if polled { "OK RX" } else { "RX" };
+    write!(out, "{kind} {:03X} ", id.as_raw()).ok()?;
+    if frame.data().is_empty() {
+        out.push('-').ok()?;
+    }
+    for byte in frame.data() {
+        write!(out, "{byte:02X}").ok()?;
+    }
+    out.push('\n').ok()?;
+    Some(out)
+}
+
+pub async fn execute(command: &str, can: &mut BufferedCanSender, swd: &mut Option<Swd>) -> Reply {
     let mut words = command.split_ascii_whitespace();
     let mut out = Reply::new();
     match (words.next(), words.next()) {
@@ -63,32 +88,11 @@ pub async fn execute(command: &str, can: &mut Can<'_>, swd: &mut Option<Swd>) ->
             let Some(frame) = parse_frame(id, hex) else {
                 return fixed("ERR FRAME\n");
             };
-            return match with_timeout(Duration::from_millis(100), can.write(&frame)).await {
-                Ok(None) => fixed("OK QUEUED\n"),
-                _ => fixed("ERR CAN TX\n"),
+            // Full software queue: refuse immediately so this task does not wait on the bus.
+            return match can.try_write(frame) {
+                Ok(()) => fixed("OK QUEUED\n"),
+                Err(_) => fixed("ERR CAN TX\n"),
             };
-        }
-        (Some("CAN"), Some("RX")) if words.next().is_none() => {
-            let envelope = match with_timeout(Duration::from_millis(100), can.read()).await {
-                Ok(Ok(frame)) => frame,
-                Ok(Err(_)) => return fixed("ERR CAN RX\n"),
-                Err(_) => return fixed("EMPTY\n"),
-            };
-            let frame = envelope.frame;
-            let Id::Standard(id) = *frame.id() else {
-                return fixed("ERR UNSUPPORTED_FRAME\n");
-            };
-            if frame.is_remote_frame() {
-                return fixed("ERR UNSUPPORTED_FRAME\n");
-            }
-            write!(out, "OK RX {:03X} ", id.as_raw()).expect("CAN prefix fits");
-            if frame.data().is_empty() {
-                out.push('-').expect("empty payload fits");
-            }
-            for byte in frame.data() {
-                write!(out, "{byte:02X}").expect("8-byte payload fits");
-            }
-            out.push('\n').expect("line ending fits");
         }
         _ => return fixed("ERR SYNTAX\n"),
     }

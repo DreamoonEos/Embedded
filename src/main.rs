@@ -2,6 +2,7 @@
 #![no_main]
 
 mod board;
+mod bridge;
 mod dap_usb;
 mod protocol;
 pub mod swd;
@@ -10,7 +11,6 @@ mod wiring;
 use board::Usb;
 use embassy_executor::Spawner;
 use embassy_futures::{join::join4, select::select};
-use embassy_stm32::can::Can;
 use embassy_stm32::usart::BufferedUart;
 use embassy_usb::{
     Builder,
@@ -19,7 +19,6 @@ use embassy_usb::{
 use embedded_io_async::{Read, Write};
 use panic_halt as _;
 use static_cell::StaticCell;
-use swd::Swd;
 
 const PACKET: usize = 64;
 // Track linker-script changes so Cargo relinks the firmware.
@@ -54,34 +53,11 @@ async fn main(_spawner: Spawner) {
     let mut device = builder.build();
     join4(
         device.run(),
-        control_port(control, ports.can, swd),
+        bridge::run(control, ports.can, swd),
         uart_port(serial, ports.uart),
         dap.run(),
     )
     .await;
-}
-
-async fn control_port(
-    mut usb: CdcAcmClass<'static, Usb>,
-    mut can: Can<'static>,
-    mut swd: Option<Swd>,
-) {
-    let mut packet = [0; PACKET];
-    loop {
-        usb.wait_connection().await;
-        let mut line = protocol::Line::new();
-        'connection: while let Ok(n) = usb.read_packet(&mut packet).await {
-            for &byte in &packet[..n] {
-                if let Some(command) = line.push(byte) {
-                    let reply = protocol::execute(command, &mut can, &mut swd).await;
-                    // Responses are bounded below 64 B, so USB needs no extra ZLP.
-                    if usb.write_packet(reply.as_bytes()).await.is_err() {
-                        break 'connection;
-                    }
-                }
-            }
-        }
-    }
 }
 
 async fn uart_port(usb: CdcAcmClass<'static, Usb>, uart: Option<BufferedUart<'static>>) {
